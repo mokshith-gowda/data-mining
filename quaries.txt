@@ -1,0 +1,116 @@
+-- Create database tables for master data
+CREATE TABLE stores (
+    store_id VARCHAR(10) PRIMARY KEY,
+    store_name VARCHAR(100),
+    region VARCHAR(50),
+    address TEXT
+);
+
+CREATE TABLE product_categories (
+    category_id VARCHAR(10) PRIMARY KEY,
+    category_name VARCHAR(100)
+);
+
+CREATE TABLE products (
+    product_code VARCHAR(20) PRIMARY KEY,
+    product_name VARCHAR(100),
+    category_id VARCHAR(10) REFERENCES product_categories(category_id)
+);
+
+-- Table for point-in-time historical pricing (Task D)
+CREATE TABLE price_revisions (
+    revision_id SERIAL PRIMARY KEY,
+    product_code VARCHAR(20) REFERENCES products(product_code),
+    effective_price DECIMAL(10,2),
+    valid_from TIMESTAMP,
+    valid_to TIMESTAMP
+);
+
+2.import psycopg2
+
+# Connect to local PostgreSQL container
+conn = psycopg2.connect(
+    dbname="annapurna",
+    user="postgres",
+    password="secretpassword",
+    host="localhost",
+    port="5432"
+)
+cur = conn.cursor()
+
+with open("sql/masters.sql", "r") as f:
+    cur.execute(f.read())
+
+conn.commit()
+cur.close()
+conn.close()
+print("PostgreSQL master tables loaded successfully.")
+
+3.import duckdb
+import os
+import hashlib
+
+con = duckdb.connect(database=':memory:')
+
+def run_etl_pipeline(run_number):
+    # Simulate processing raw billing logs into Hive-partitioned parquet
+    # Deduplicating via composite key: (bill_number, timestamp, store_id, product_code)
+    con.execute("""
+        CREATE OR REPLACE TABLE processed_sales AS 
+        SELECT DISTINCT 
+            bill_number,
+            store_id,
+            product_code,
+            quantity,
+            unit_price,
+            line_type,
+            CAST(timestamp AS DATE) as sale_date,
+            strftime(timestamp, '%Y') as year,
+            strftime(timestamp, '%m') as month
+        FROM read_csv_auto('data/sales/*.csv')
+        WHERE line_type = 'SALE';
+    """)
+    
+    row_count = con.execute("SELECT COUNT(*) FROM processed_sales;").fetchone()[0]
+    
+    # Calculate checksum to prove idempotency across runs
+    df = con.execute("SELECT * FROM processed_sales ORDER BY bill_number, timestamp, store_id").df()
+    checksum = hashlib.md5(pd_to_bytes := str(df.values).encode()).hexdigest()[:10]
+    
+    print(f"Run #{run_number}: Row Count = {row_count} | Checksum = {checksum}")
+
+print("--- Running Idempotency Proof (3 Successive Executions) ---")
+run_etl_pipeline(1)
+run_etl_pipeline(2)
+run_etl_pipeline(3)
+
+4.import duckdb
+
+con = duckdb.connect(database=':memory:')
+
+# 1. Attach Postgres and register Parquet view with Hive partitioning (Tasks A & E)
+con.sql("INSTALL postgres; LOAD postgres;")
+con.sql("ATTACH 'dbname=annapurna user=postgres password=secretpassword host=localhost port=5432' AS pg (TYPE POSTGRES);")
+con.sql("CREATE VIEW v_sales AS SELECT * FROM read_parquet('data/sales/year=*/month=*/*/*.parquet', hive_partitioning=1);")
+
+# 2. Federated Query with As-Of Temporal Pricing Join (Tasks D & E)
+query = """
+    SELECT 
+        p.category_name,
+        SUM(sales.quantity * pr.effective_price) AS total_revenue
+    FROM v_sales sales
+    JOIN pg.products pr_master ON sales.product_code = pr_master.product_code
+    JOIN pg.product_categories p ON pr_master.category_id = p.category_id
+    -- Point-in-time price join using price revisions table (Task D)
+    JOIN pg.price_revisions pr ON sales.product_code = pr.product_code
+     AND sales.timestamp >= pr.valid_from 
+     AND (sales.timestamp < pr.valid_to OR pr.valid_to IS NULL)
+    WHERE sales.line_type = 'SALE'
+      AND sales.year = '2024' 
+      AND sales.month = '10'
+    GROUP BY 1
+    ORDER BY total_revenue DESC;
+"""
+
+print("--- CFO October 2024 Revenue Report (Federated Query Output) ---")
+print(con.execute(query.strip()).df())
