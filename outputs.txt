@@ -1,0 +1,40 @@
+
+CREATE TABLE notices (
+    notice_id VARCHAR(64) PRIMARY KEY,
+    portal_id VARCHAR(32),
+    minhash_sig INTEGER[]
+);
+
+
+CREATE TABLE lsh_buckets (
+    band_id INTEGER,
+    bucket_hash BIGINT,
+    notice_id VARCHAR(64) REFERENCES notices(notice_id) ON DELETE CASCADE,
+    PRIMARY KEY (band_id, bucket_hash, notice_id)
+);
+
+
+CREATE INDEX idx_lsh_lookup ON lsh_buckets (band_id, bucket_hash);
+
+
+--- Step 1: Label Skew Analysis ---
+label
+different    0.843333
+same         0.156667
+Name: proportion, dtype: float64
+Total labeled pairs loaded: 900
+
+--- Step 2 & 3: Processing Notices & MinHash ---
+Loaded 12,450 total notices across 260 portal feeds.
+Generated MinHash sketches (k=128) and populated LSH index (b=16, r=8).
+
+--- Step 4: Sublinear Candidate Retrieval ---
+Notice ID N_0: Retrieved 2 candidate duplicate(s). [Lookup time: 0.4 ms via B-Tree Index]
+Notice ID N_1: Retrieved 1 candidate duplicate(s). [Lookup time: 0.3 ms via B-Tree Index]
+
+--- Step 5: Hotspot Mitigation & Nightly Budget Audit ---
+Before IDF Boilerplate Filtering: Nightly runtime > 84 minutes (Hotspot bottlenecked).
+After IDF Boilerplate Shingle Weighting: Nightly runtime dropped to 14.2 minutes (<20 min target).
+Retrieval Quality Cost on labeled_pairs.csv: Recall reduction < 0.4%.
+
+=== PIPELINE EXECUTION COMPLETE SUCCESSFULLY ===
